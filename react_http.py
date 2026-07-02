@@ -16,6 +16,7 @@ import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
 
@@ -24,6 +25,7 @@ from websocket import WebSocketApp
 
 API_BASE = "https://discord.com/api/v10"
 ISRAEL_FLAG = "\U0001f1ee\U0001f1f1"  # 🇮🇱
+MESSAGE_CHANNEL_TYPES = {0, 5}  # text and announcement channels
 CHROME_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -56,6 +58,12 @@ class RunTimer:
         return self.expired()
 
 
+@dataclass(frozen=True)
+class ChannelSelection:
+    all_channels: bool
+    ids: tuple[int, ...]
+
+
 def parse_channel_ids(raw: str) -> list[int]:
     ids: list[int] = []
     for part in raw.split(","):
@@ -65,6 +73,12 @@ def parse_channel_ids(raw: str) -> list[int]:
     if not ids:
         raise argparse.ArgumentTypeError("at least one channel ID is required")
     return ids
+
+
+def parse_channel_target(raw: str) -> ChannelSelection:
+    if raw.strip().lower() == "all":
+        return ChannelSelection(all_channels=True, ids=())
+    return ChannelSelection(all_channels=False, ids=tuple(parse_channel_ids(raw)))
 
 
 def parse_args() -> argparse.Namespace:
@@ -81,11 +95,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--emoji", default=os.getenv("DISCORD_EMOJI", ISRAEL_FLAG))
     parser.add_argument(
         "--channel",
-        type=parse_channel_ids,
-        default=parse_channel_ids(channel_default) if channel_default else None,
+        "--channels",
+        type=parse_channel_target,
+        default=parse_channel_target(channel_default) if channel_default else None,
         required=channel_default is None,
-        metavar="ID[,ID...]",
-        help="Target channel ID(s), comma-separated for multiple",
+        metavar="ID[,ID...]|all",
+        help="Channel ID(s), comma-separated, or 'all' for every accessible text channel",
     )
     guild_default = os.getenv("DISCORD_GUILD")
     parser.add_argument(
@@ -163,6 +178,11 @@ class DiscordAPI:
 
     def get_channel(self, channel_id: int) -> dict[str, Any]:
         response = self.request("GET", f"/channels/{channel_id}")
+        response.raise_for_status()
+        return response.json()
+
+    def list_guild_channels(self, guild_id: int) -> list[dict[str, Any]]:
+        response = self.request("GET", f"/guilds/{guild_id}/channels")
         response.raise_for_status()
         return response.json()
 
@@ -380,8 +400,11 @@ def run_gateway(
 
         if op == 0 and event == "READY" and isinstance(data, dict):
             user = data.get("user", {})
-            watched = ", ".join(str(channel_id) for channel_id in sorted(channel_ids))
-            print(f"Gateway ready as {user.get('username')} — watching channel(s) {watched}")
+            if len(channel_ids) <= 10:
+                watched = ", ".join(str(channel_id) for channel_id in sorted(channel_ids))
+            else:
+                watched = f"{len(channel_ids)} channels"
+            print(f"Gateway ready as {user.get('username')} — watching {watched}")
             return
 
         if op == 0 and event == "MESSAGE_CREATE" and isinstance(data, dict):
@@ -457,6 +480,17 @@ def run_gateway(
             return
 
 
+def validate_guild_channel(channel: dict[str, Any], channel_id: int, guild_id: int) -> bool:
+    channel_guild = channel.get("guild_id")
+    if channel_guild is None or int(channel_guild) != guild_id:
+        print(
+            f"Error: channel {channel_id} is not in server {guild_id}.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return True
+
+
 def resolve_channels(
     api: DiscordAPI,
     channel_ids: list[int],
@@ -470,16 +504,50 @@ def resolve_channels(
             print(f"Error: cannot access channel {channel_id} ({exc})", file=sys.stderr)
             sys.exit(1)
 
-        channel_guild = channel.get("guild_id")
-        if channel_guild is None or int(channel_guild) != guild_id:
-            print(
-                f"Error: channel {channel_id} is not in server {guild_id}.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-
+        validate_guild_channel(channel, channel_id, guild_id)
         channels.append(channel)
     return channels
+
+
+def resolve_all_channels(
+    api: DiscordAPI,
+    guild_id: int,
+) -> tuple[list[int], list[dict[str, Any]]]:
+    try:
+        guild_channels = api.list_guild_channels(guild_id)
+    except requests.HTTPError as exc:
+        print(f"Error: cannot list channels for server {guild_id} ({exc})", file=sys.stderr)
+        sys.exit(1)
+
+    candidates = sorted(
+        (
+            channel
+            for channel in guild_channels
+            if int(channel.get("type", -1)) in MESSAGE_CHANNEL_TYPES
+        ),
+        key=lambda channel: int(channel.get("position", 0)),
+    )
+
+    channel_ids: list[int] = []
+    channels: list[dict[str, Any]] = []
+    for candidate in candidates:
+        channel_id = int(candidate["id"])
+        name = candidate.get("name", str(channel_id))
+        try:
+            channel = api.get_channel(channel_id)
+        except requests.HTTPError:
+            print(f"Warning: skipping #{name} ({channel_id}): no access", file=sys.stderr)
+            continue
+        validate_guild_channel(channel, channel_id, guild_id)
+        channel_ids.append(channel_id)
+        channels.append(channel)
+
+    if not channel_ids:
+        print("Error: no accessible text channels found in server.", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Resolved {len(channel_ids)} accessible text channel(s) in server {guild_id}.")
+    return channel_ids, channels
 
 
 def main() -> None:
@@ -488,10 +556,6 @@ def main() -> None:
         print("Error: --token is required (or set DISCORD_TOKEN).", file=sys.stderr)
         sys.exit(1)
 
-    channel_ids = list(dict.fromkeys(args.channel))
-    if len(channel_ids) < len(args.channel):
-        print("Warning: duplicate channel IDs were removed.", file=sys.stderr)
-
     api = DiscordAPI(args.token)
     try:
         me = api.me()
@@ -499,13 +563,24 @@ def main() -> None:
         print("Error: invalid token or API failure on /users/@me.", file=sys.stderr)
         sys.exit(1)
 
-    channels = resolve_channels(api, channel_ids, args.guild)
-    channel_labels = [
-        f"#{channel.get('name') or channel_id}"
-        for channel, channel_id in zip(channels, channel_ids)
-    ]
+    if args.channel.all_channels:
+        channel_ids, channels = resolve_all_channels(api, args.guild)
+    else:
+        channel_ids = list(dict.fromkeys(args.channel.ids))
+        if len(channel_ids) < len(args.channel.ids):
+            print("Warning: duplicate channel IDs were removed.", file=sys.stderr)
+        channels = resolve_channels(api, channel_ids, args.guild)
+
+    if len(channel_ids) <= 10:
+        channel_labels = [
+            f"#{channel.get('name') or channel_id}"
+            for channel, channel_id in zip(channels, channel_ids)
+        ]
+        channel_summary = ", ".join(channel_labels)
+    else:
+        channel_summary = f"{len(channel_ids)} channels"
     print(
-        f"User: {me['username']} | channel(s) {', '.join(channel_labels)} | "
+        f"User: {me['username']} | channel(s) {channel_summary} | "
         f"server {args.guild} | emoji {args.emoji!r}"
     )
 

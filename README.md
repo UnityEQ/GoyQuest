@@ -7,7 +7,7 @@ Lightweight CLI tool that reacts to Discord channel messages with the Israeli fl
 - **Live (default)** — watches for new messages via WebSocket and reacts in real time
 - **Backfill (optional)** — on startup, reacts to messages from the last N minutes in your target channel(s)
 - **Run timer (optional)** — stop automatically after N minutes, or run until Ctrl+C (default)
-- **One or more channels** — pass a single channel ID or comma-separated IDs via `--channel`
+- **One or more channels** — pass channel IDs via `--channel`, or use `--channel all` for every accessible text channel in the server
 
 ## Requirements
 
@@ -85,7 +85,15 @@ Or:
 python react_http.py --token YOUR_TOKEN --server 1111111111111111111 --channel 1234567890123456789,9876543210987654321
 ```
 
-`--server` is an alias for `--guild`. Every channel ID must belong to that server.
+**All text channels in the server:**
+
+```powershell
+python react_http.py --token YOUR_TOKEN --server 1111111111111111111 --channel all
+```
+
+`--channel all` (or `--channels all`) discovers every text and announcement channel in the server that your account can access. Channels you cannot read are skipped.
+
+`--server` is an alias for `--guild`.
 
 **Run timer (optional):**
 
@@ -131,7 +139,7 @@ Checks your token, server, and channel IDs via the REST API, then exits.
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--token` | *(required)* | User token |
-| `--channel` | *(required)* | Target channel ID(s), comma-separated for multiple |
+| `--channel`, `--channels` | *(required)* | Channel ID(s), comma-separated, or `all` for every accessible text channel |
 | `--guild`, `--server` | *(required)* | Server ID — channels must belong to this server |
 | `--emoji` | 🇮🇱 | Emoji to react with |
 | `--minutes` | `0` | Backfill window in minutes (`0` = live only) |
@@ -144,13 +152,13 @@ Checks your token, server, and channel IDs via the REST API, then exits.
 | Environment variable | CLI flag |
 |---------------------|----------|
 | `DISCORD_TOKEN` | `--token` |
-| `DISCORD_CHANNEL` | `--channel` |
+| `DISCORD_CHANNEL` | `--channel` (comma-separated IDs or `all`) |
 | `DISCORD_GUILD` | `--server` / `--guild` |
 | `DISCORD_EMOJI` | `--emoji` |
 | `BACKFILL_MINUTES` | `--minutes` |
 | `RUN_MINUTES` | `--timer` |
 
-If `DISCORD_TOKEN`, `DISCORD_GUILD`, and `DISCORD_CHANNEL` are set, you can omit `--token`, `--server`, and `--channel` on the command line. Put secrets in a `.env` file locally — it is gitignored.
+If `DISCORD_TOKEN`, `DISCORD_GUILD`, and `DISCORD_CHANNEL` are set, you can omit `--token`, `--server`, and `--channel` on the command line. Set `DISCORD_CHANNEL=all` to use all channels. Put secrets in a `.env` file locally — it is gitignored.
 
 ## How it works
 
