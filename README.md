@@ -5,7 +5,7 @@ Lightweight CLI tool that reacts to Discord channel messages with the Israeli fl
 ## What it does
 
 - **Live (default)** — watches for new messages via WebSocket and reacts in real time
-- **Backfill (optional)** — on startup, reacts to messages from the last N minutes in your target channel(s)
+- **Backfill (optional)** — on startup, react to recent messages by time (`--minutes`) or message count (`--last`)
 - **Run timer (optional)** — stop automatically after N minutes, or run until Ctrl+C (default)
 - **One or more channels** — pass channel IDs via `--channel`, or use `--channel all` for every accessible text channel in the server
 
@@ -104,13 +104,21 @@ python react_http.py --token YOUR_TOKEN --server 1111111111111111111 --channel 1
 
 The timer counts from script start and applies to backfill and live listening.
 
-**Backfill window (optional, in minutes):**
+**Backfill by time (optional, in minutes):**
 
 ```powershell
 python react_http.py --token YOUR_TOKEN --server 1111111111111111111 --channel 1234567890123456789                    # live only (default)
 python react_http.py --token YOUR_TOKEN --server 1111111111111111111 --channel 1234567890123456789 --minutes 60   # backfill last 60 minutes, then live
 python react_http.py --token YOUR_TOKEN --server 1111111111111111111 --channel 1234567890123456789 --minutes 1440 # backfill last 24 hours, then live
 ```
+
+**Backfill by message count:**
+
+```powershell
+python react_http.py --token YOUR_TOKEN --server 1111111111111111111 --channel 1234567890123456789 --last 30   # react on the 30 most recent messages, then live
+```
+
+Use `--minutes` or `--last`, not both. `--last` applies per channel.
 
 **Backfill only (no WebSocket):**
 
@@ -142,7 +150,8 @@ Checks your token, server, and channel IDs via the REST API, then exits.
 | `--channel`, `--channels` | *(required)* | Channel ID(s), comma-separated, or `all` for every accessible text channel |
 | `--guild`, `--server` | *(required)* | Server ID — channels must belong to this server |
 | `--emoji` | 🇮🇱 | Emoji to react with |
-| `--minutes` | `0` | Backfill window in minutes (`0` = live only) |
+| `--minutes` | `0` | Backfill messages from the last N minutes (`0` = skip) |
+| `--last` | `0` | Backfill the last N messages per channel (`0` = skip) |
 | `--delay` | `0.35` | Seconds between reactions during backfill |
 | `--skip-bots` | off | Ignore messages from bots |
 | `--skip-self` | off | Skip your own messages |
@@ -156,6 +165,7 @@ Checks your token, server, and channel IDs via the REST API, then exits.
 | `DISCORD_GUILD` | `--server` / `--guild` |
 | `DISCORD_EMOJI` | `--emoji` |
 | `BACKFILL_MINUTES` | `--minutes` |
+| `BACKFILL_LAST` | `--last` |
 | `RUN_MINUTES` | `--timer` |
 
 If `DISCORD_TOKEN`, `DISCORD_GUILD`, and `DISCORD_CHANNEL` are set, you can omit `--token`, `--server`, and `--channel` on the command line. Set `DISCORD_CHANNEL=all` to use all channels. Put secrets in a `.env` file locally — it is gitignored.

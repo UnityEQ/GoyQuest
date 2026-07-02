@@ -112,11 +112,18 @@ def parse_args() -> argparse.Namespace:
         dest="guild",
         help="Server ID — channels must belong to this server (or set DISCORD_GUILD)",
     )
-    parser.add_argument(
+    backfill_group = parser.add_mutually_exclusive_group()
+    backfill_group.add_argument(
         "--minutes",
         type=float,
         default=float(os.getenv("BACKFILL_MINUTES", "0")),
         help="Backfill messages from the last N minutes (0 = skip, default is live only)",
+    )
+    backfill_group.add_argument(
+        "--last",
+        type=int,
+        default=int(os.getenv("BACKFILL_LAST", "0")),
+        help="Backfill the last N messages per channel (0 = skip, default is live only)",
     )
     parser.add_argument(
         "--delay",
@@ -238,6 +245,68 @@ def should_process(
     if skip_bots and author.get("bot"):
         return False, "bot message (--skip-bots)"
     return True, None
+
+
+def fetch_last_messages(
+    api: DiscordAPI,
+    channel_id: int,
+    count: int,
+) -> list[dict[str, Any]]:
+    messages: list[dict[str, Any]] = []
+    before: int | None = None
+    while len(messages) < count:
+        batch = api.fetch_messages(
+            channel_id,
+            limit=min(100, count - len(messages)),
+            before=before,
+        )
+        if not batch:
+            break
+        messages.extend(batch)
+        before = int(batch[-1]["id"])
+    return messages[:count]
+
+
+def backfill_last(
+    api: DiscordAPI,
+    channel_id: int,
+    emoji: str,
+    count: int,
+    delay: float,
+    *,
+    skip_bots: bool,
+    skip_self: bool,
+    timer: RunTimer,
+) -> None:
+    assert api.user_id is not None
+    print(f"Backfill channel {channel_id}: last {count} message(s)")
+
+    messages = fetch_last_messages(api, channel_id, count)
+    reacted = 0
+    skipped = 0
+
+    for message in messages:
+        if timer.expired():
+            print(f"Backfill stopped for {channel_id}: timer expired.")
+            return
+        ok, reason = should_process(
+            message, api.user_id, skip_bots=skip_bots, skip_self=skip_self
+        )
+        if not ok:
+            skipped += 1
+            author = message.get("author", {}).get("username", "?")
+            print(f"  skip {message['id']} from {author}: {reason}")
+            continue
+        if api.add_reaction(channel_id, int(message["id"]), emoji):
+            reacted += 1
+            print(f"  reacted on {message['id']}")
+        if delay:
+            time.sleep(delay)
+
+    print(
+        f"Backfill done for {channel_id}: {reacted} reaction(s), {skipped} skipped, "
+        f"{len(messages)} message(s) fetched."
+    )
 
 
 def backfill(
@@ -586,7 +655,22 @@ def main() -> None:
 
     timer = RunTimer(args.timer)
 
-    if args.minutes > 0:
+    if args.last > 0:
+        for channel_id in channel_ids:
+            if timer.expired():
+                print(f"Timer expired after {args.timer} minute(s). Stopping.")
+                return
+            backfill_last(
+                api,
+                channel_id,
+                args.emoji,
+                args.last,
+                args.delay,
+                skip_bots=args.skip_bots,
+                skip_self=args.skip_self,
+                timer=timer,
+            )
+    elif args.minutes > 0:
         for channel_id in channel_ids:
             if timer.expired():
                 print(f"Timer expired after {args.timer} minute(s). Stopping.")
