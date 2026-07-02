@@ -24,6 +24,36 @@ from websocket import WebSocketApp
 
 API_BASE = "https://discord.com/api/v10"
 ISRAEL_FLAG = "\U0001f1ee\U0001f1f1"  # 🇮🇱
+CHROME_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/136.0.0.0 Safari/537.36"
+)
+
+
+class RunTimer:
+    def __init__(self, minutes: float) -> None:
+        self.minutes = minutes
+        self._deadline = time.monotonic() + minutes * 60 if minutes > 0 else None
+
+    @property
+    def limited(self) -> bool:
+        return self._deadline is not None
+
+    def expired(self) -> bool:
+        return self._deadline is not None and time.monotonic() >= self._deadline
+
+    def wait_up_to(self, seconds: float) -> bool:
+        """Sleep up to seconds. Returns True if the timer expired."""
+        if not self.limited:
+            time.sleep(seconds)
+            return False
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            if self.expired():
+                return True
+            time.sleep(min(0.25, end - time.monotonic()))
+        return self.expired()
 
 
 def parse_channel_ids(raw: str) -> list[int]:
@@ -68,10 +98,10 @@ def parse_args() -> argparse.Namespace:
         help="Server ID — channels must belong to this server (or set DISCORD_GUILD)",
     )
     parser.add_argument(
-        "--hours",
+        "--minutes",
         type=float,
-        default=float(os.getenv("BACKFILL_HOURS", "1")),
-        help="Backfill messages from the last N hours (0 = skip)",
+        default=float(os.getenv("BACKFILL_MINUTES", "0")),
+        help="Backfill messages from the last N minutes (0 = skip, default is live only)",
     )
     parser.add_argument(
         "--delay",
@@ -90,6 +120,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run backfill then exit (no WebSocket)",
     )
+    parser.add_argument(
+        "--timer",
+        type=float,
+        default=float(os.getenv("RUN_MINUTES", "0")),
+        help="Stop after N minutes (0 = run until Ctrl+C)",
+    )
     return parser.parse_args()
 
 
@@ -100,11 +136,7 @@ class DiscordAPI:
             {
                 "Authorization": token,
                 "Content-Type": "application/json",
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/120.0.0.0 Safari/537.36"
-                ),
+                "User-Agent": CHROME_USER_AGENT,
             }
         )
         self.user_id: int | None = None
@@ -192,14 +224,15 @@ def backfill(
     api: DiscordAPI,
     channel_id: int,
     emoji: str,
-    hours: float,
+    minutes: float,
     delay: float,
     *,
     skip_bots: bool,
     skip_self: bool,
+    timer: RunTimer,
 ) -> None:
     assert api.user_id is not None
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
     print(f"Backfill channel {channel_id} since {cutoff.isoformat()}")
 
     scanned = 0
@@ -208,12 +241,19 @@ def backfill(
     before: int | None = None
 
     while True:
+        if timer.expired():
+            print(f"Backfill stopped for {channel_id}: timer expired.")
+            return
+
         batch = api.fetch_messages(channel_id, limit=100, before=before)
         if not batch:
             break
 
         reached_cutoff = False
         for message in batch:
+            if timer.expired():
+                print(f"Backfill stopped for {channel_id}: timer expired.")
+                return
             scanned += 1
             created = parse_timestamp(message["timestamp"])
             if created < cutoff:
@@ -252,6 +292,7 @@ def run_gateway(
     *,
     skip_bots: bool,
     skip_self: bool,
+    timer: RunTimer,
 ) -> None:
     assert api.user_id is not None
     sequence: int | None = None
@@ -277,6 +318,10 @@ def run_gateway(
         def loop() -> None:
             interval = interval_ms / 1000.0
             while not heartbeat_stop.wait(interval):
+                if timer.expired():
+                    print(f"Timer expired after {timer.minutes} minute(s). Stopping.")
+                    ws.close()
+                    return
                 send_json(ws, {"op": 1, "d": get_sequence()})
 
         heartbeat_stop.clear()
@@ -374,15 +419,22 @@ def run_gateway(
         print(f"Gateway closed ({status}): {msg}")
 
     while True:
+        if timer.expired():
+            print(f"Timer expired after {timer.minutes} minute(s). Stopping.")
+            return
+
         try:
             gateway = api.gateway_url()
         except requests.HTTPError as exc:
             print(f"Failed to get gateway URL: {exc}")
-            time.sleep(5)
+            if timer.wait_up_to(5):
+                print(f"Timer expired after {timer.minutes} minute(s). Stopping.")
+                return
             continue
 
         ws = WebSocketApp(
             gateway,
+            header=[f"User-Agent: {CHROME_USER_AGENT}"],
             on_open=on_open,
             on_message=on_message,
             on_error=on_error,
@@ -396,8 +448,13 @@ def run_gateway(
             return
         stop_heartbeat()
         set_sequence(None)
+        if timer.expired():
+            print(f"Timer expired after {timer.minutes} minute(s). Stopping.")
+            return
         print("Reconnecting in 5s...")
-        time.sleep(5)
+        if timer.wait_up_to(5):
+            print(f"Timer expired after {timer.minutes} minute(s). Stopping.")
+            return
 
 
 def resolve_channels(
@@ -452,22 +509,36 @@ def main() -> None:
         f"server {args.guild} | emoji {args.emoji!r}"
     )
 
-    if args.hours > 0:
+    timer = RunTimer(args.timer)
+
+    if args.minutes > 0:
         for channel_id in channel_ids:
+            if timer.expired():
+                print(f"Timer expired after {args.timer} minute(s). Stopping.")
+                return
             backfill(
                 api,
                 channel_id,
                 args.emoji,
-                args.hours,
+                args.minutes,
                 args.delay,
                 skip_bots=args.skip_bots,
                 skip_self=args.skip_self,
+                timer=timer,
             )
 
-    if args.backfill_only:
+    if args.backfill_only or timer.expired():
+        if timer.expired():
+            print(f"Timer expired after {args.timer} minute(s). Stopping.")
         return
 
-    print("Listening via Gateway WebSocket. Ctrl+C to stop.")
+    if timer.limited:
+        print(
+            f"Listening via Gateway WebSocket. Stops after {args.timer} minute(s). "
+            "Ctrl+C to stop early."
+        )
+    else:
+        print("Listening via Gateway WebSocket. Ctrl+C to stop.")
     run_gateway(
         api,
         args.token,
@@ -475,6 +546,7 @@ def main() -> None:
         args.emoji,
         skip_bots=args.skip_bots,
         skip_self=args.skip_self,
+        timer=timer,
     )
 
 

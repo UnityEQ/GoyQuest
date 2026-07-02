@@ -4,8 +4,9 @@ Lightweight CLI tool that reacts to Discord channel messages with the Israeli fl
 
 ## What it does
 
-- **Backfill** — on startup, reacts to messages from the last N hours in your target channel(s)
-- **Live** — watches for new messages via WebSocket and reacts in real time
+- **Live (default)** — watches for new messages via WebSocket and reacts in real time
+- **Backfill (optional)** — on startup, reacts to messages from the last N minutes in your target channel(s)
+- **Run timer (optional)** — stop automatically after N minutes, or run until Ctrl+C (default)
 - **One or more channels** — pass a single channel ID or comma-separated IDs via `--channel`
 
 ## Requirements
@@ -66,7 +67,7 @@ Example: `--server 1111111111111111111 --channel 1234567890123456789,98765432109
 
 ## Usage
 
-**Single channel (backfill last hour, then watch for new messages):**
+**Single channel (live only — default):**
 
 ```powershell
 python react_http.py --token YOUR_TOKEN --server 1111111111111111111 --channel 1234567890123456789
@@ -86,25 +87,44 @@ python react_http.py --token YOUR_TOKEN --server 1111111111111111111 --channel 1
 
 `--server` is an alias for `--guild`. Every channel ID must belong to that server.
 
-**Backfill window:**
+**Run timer (optional):**
 
 ```powershell
-python react_http.py --token YOUR_TOKEN --server 1111111111111111111 --channel 1234567890123456789              # last 1 hour (default)
-python react_http.py --token YOUR_TOKEN --server 1111111111111111111 --channel 1234567890123456789 --hours 24 # last 24 hours
-python react_http.py --token YOUR_TOKEN --server 1111111111111111111 --channel 1234567890123456789 --hours 0  # skip backfill, live only
+python react_http.py --token YOUR_TOKEN --server 1111111111111111111 --channel 1234567890123456789                # run until Ctrl+C (default)
+python react_http.py --token YOUR_TOKEN --server 1111111111111111111 --channel 1234567890123456789 --timer 30   # stop after 30 minutes
+```
+
+The timer counts from script start and applies to backfill and live listening.
+
+**Backfill window (optional, in minutes):**
+
+```powershell
+python react_http.py --token YOUR_TOKEN --server 1111111111111111111 --channel 1234567890123456789                    # live only (default)
+python react_http.py --token YOUR_TOKEN --server 1111111111111111111 --channel 1234567890123456789 --minutes 60   # backfill last 60 minutes, then live
+python react_http.py --token YOUR_TOKEN --server 1111111111111111111 --channel 1234567890123456789 --minutes 1440 # backfill last 24 hours, then live
 ```
 
 **Backfill only (no WebSocket):**
 
 ```powershell
+python react_http.py --token YOUR_TOKEN --server 1111111111111111111 --channel 1234567890123456789 --minutes 60 --backfill-only
+```
+
+**Backfill, then live, with a run timer:**
+
+```powershell
+python react_http.py --token YOUR_TOKEN --server 1111111111111111111 --channel 1234567890123456789 --minutes 60 --timer 120
+```
+
+Backfills the last 60 minutes, then listens for new messages, and stops after 120 minutes total (including backfill).
+
+**Validate token and channel access (no reactions, no WebSocket):**
+
+```powershell
 python react_http.py --token YOUR_TOKEN --server 1111111111111111111 --channel 1234567890123456789 --backfill-only
 ```
 
-**Test connection without reacting:**
-
-```powershell
-python react_http.py --token YOUR_TOKEN --server 1111111111111111111 --channel 1234567890123456789 --backfill-only --hours 0
-```
+Checks your token, server, and channel IDs via the REST API, then exits.
 
 ## CLI flags
 
@@ -114,15 +134,23 @@ python react_http.py --token YOUR_TOKEN --server 1111111111111111111 --channel 1
 | `--channel` | *(required)* | Target channel ID(s), comma-separated for multiple |
 | `--guild`, `--server` | *(required)* | Server ID — channels must belong to this server |
 | `--emoji` | 🇮🇱 | Emoji to react with |
-| `--hours` | `1` | Backfill window in hours (`0` = skip) |
+| `--minutes` | `0` | Backfill window in minutes (`0` = live only) |
 | `--delay` | `0.35` | Seconds between reactions during backfill |
 | `--skip-bots` | off | Ignore messages from bots |
 | `--skip-self` | off | Skip your own messages |
 | `--backfill-only` | off | Backfill then exit |
+| `--timer` | `0` | Stop after N minutes (`0` = run until Ctrl+C) |
 
-Environment variables: `DISCORD_TOKEN`, `DISCORD_CHANNEL`, `DISCORD_GUILD`, `DISCORD_EMOJI`, `BACKFILL_HOURS`
+| Environment variable | CLI flag |
+|---------------------|----------|
+| `DISCORD_TOKEN` | `--token` |
+| `DISCORD_CHANNEL` | `--channel` |
+| `DISCORD_GUILD` | `--server` / `--guild` |
+| `DISCORD_EMOJI` | `--emoji` |
+| `BACKFILL_MINUTES` | `--minutes` |
+| `RUN_MINUTES` | `--timer` |
 
-If `DISCORD_TOKEN`, `DISCORD_GUILD`, and `DISCORD_CHANNEL` are set, you can omit `--token`, `--server`, and `--channel` on the command line.
+If `DISCORD_TOKEN`, `DISCORD_GUILD`, and `DISCORD_CHANNEL` are set, you can omit `--token`, `--server`, and `--channel` on the command line. Put secrets in a `.env` file locally — it is gitignored.
 
 ## How it works
 
@@ -139,6 +167,7 @@ goyquest/
 ├── react_http.py    # Main script
 ├── requirements.txt
 ├── run.ps1          # PowerShell launcher
+├── .gitignore
 └── README.md
 ```
 
@@ -146,4 +175,5 @@ goyquest/
 
 - Automating a user account may violate Discord's Terms of Service. Use at your own risk.
 - Do not commit tokens to public repositories.
+- Press **Ctrl+C** in the terminal to stop early (even when `--timer` is set).
 - Windows PowerShell may not display 🇮🇱 in the console; reactions still work on Discord.
