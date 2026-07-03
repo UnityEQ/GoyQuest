@@ -196,6 +196,22 @@ goyquest/
 └── README.md
 ```
 
+## Random findings
+
+Anecdotal things we've run into while using this — not official Discord policy, but worth knowing:
+
+**Join servers before you run, not one-by-one after kicks**
+
+If you get kicked or removed from a channel (or a couple of them), Discord may temporarily restrict your account from joining **new** servers or channels for roughly **24–48 hours**. That lockout is easy to hit if you join a server, run the script, get kicked, then immediately join another server and repeat.
+
+Safer approach:
+
+1. Join all the servers you plan to use **first**
+2. Let your account settle in those servers
+3. Then run Goyquest across the channels you already have access to
+
+Avoid the loop of "join server → run script → get kicked → join next server" in quick succession.
+
 ## Notes
 
 - Automating a user account may violate Discord's Terms of Service. Use at your own risk.
