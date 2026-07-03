@@ -199,6 +199,8 @@ goyquest/
 
 ## Windows GUI (`newbs/`)
 
+![Goyquest Windows GUI](goyquest-gui.png)
+
 The `newbs/` folder is a **separate Windows app** for people who do not want the command line. It wraps the same `react_http.py` logic in a form: fill in token, server, and channel, set optional flags, press **Go**, and watch the live log. It always reacts with 🇮🇱 (no emoji setting in the GUI).
 
 **End users:** download `Goyquest-windows.zip` from [GitHub Releases](https://github.com/UnityEQ/GoyQuest/releases), extract the `Goyquest` folder, and run `Goyquest.exe`. Keep `_internal` next to the exe.
