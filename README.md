@@ -189,12 +189,52 @@ If `DISCORD_TOKEN`, `DISCORD_GUILD`, and `DISCORD_CHANNEL` are set, you can omit
 
 ```
 goyquest/
-├── react_http.py    # Main script
+├── react_http.py    # CLI (main script)
 ├── requirements.txt
-├── run.ps1          # PowerShell launcher
+├── run.ps1          # PowerShell CLI launcher
+├── newbs/           # Windows GUI + exe build (see below)
 ├── .gitignore
 └── README.md
 ```
+
+## Windows GUI (`newbs/`)
+
+The `newbs/` folder is a **separate Windows app** for people who do not want the command line. It wraps the same `react_http.py` logic in a form: fill in token, server, and channel, set optional flags, press **Go**, and watch the live log. It always reacts with 🇮🇱 (no emoji setting in the GUI).
+
+**End users:** download `Goyquest-windows.zip` from [GitHub Releases](https://github.com/UnityEQ/GoyQuest/releases), extract the `Goyquest` folder, and run `Goyquest.exe`. Keep `_internal` next to the exe.
+
+**Build locally (Windows):**
+
+```powershell
+cd newbs
+.\build.ps1
+```
+
+Output: `newbs\dist\Goyquest\Goyquest.exe` (ship the whole `Goyquest` folder, or zip it with `.\package_release.ps1`).
+
+**Dev without building:**
+
+```powershell
+cd newbs
+.\dev.ps1
+```
+
+Requires Python 3.10+ and `pip install -r newbs\requirements.txt`. Build deps: `requirements-build.txt` (PyInstaller).
+
+More build and antivirus notes: `newbs/BUILD.txt`.
+
+### GitHub Releases
+
+**Automatic (recommended):** push a version tag and GitHub Actions builds and uploads the zip:
+
+```powershell
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+The workflow in `.github/workflows/release.yml` runs on tags like `v1.0.0`, builds the Windows GUI, and attaches `Goyquest-windows.zip` to the release.
+
+**Manual:** after `.\build.ps1`, run `.\package_release.ps1`, then on GitHub go to **Releases → Draft a new release**, pick a tag, and upload `newbs\dist\Goyquest-windows.zip`.
 
 ## Random findings
 

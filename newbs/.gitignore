@@ -1,0 +1,5 @@
+# PyInstaller output — run .\build.ps1 from this folder
+build/
+dist/
+__pycache__/
+*.pyc

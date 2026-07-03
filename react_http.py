@@ -10,6 +10,7 @@ Uses a user token to react with an emoji on channel messages:
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import sys
@@ -28,6 +29,84 @@ from websocket import WebSocketApp
 API_BASE = "https://discord.com/api/v10"
 ISRAEL_FLAG = "\U0001f1ee\U0001f1f1"  # 🇮🇱
 MESSAGE_CHANNEL_TYPES = {0, 5}  # text and announcement channels
+
+
+def configure_stdio() -> None:
+    """Use UTF-8 on Windows so emoji in log output does not crash under cp1252."""
+    if sys.platform == "win32":
+        os.environ.setdefault("PYTHONUTF8", "1")
+        os.environ.setdefault("PYTHONIOENCODING", "utf-8:replace")
+
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if stream is None:
+            continue
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+            continue
+        except (AttributeError, OSError, ValueError):
+            pass
+        buffer = getattr(stream, "buffer", None)
+        if buffer is None:
+            continue
+        try:
+            wrapper = io.TextIOWrapper(
+                buffer,
+                encoding="utf-8",
+                errors="replace",
+                line_buffering=stream.line_buffering,
+            )
+            setattr(sys, stream_name, wrapper)
+        except (AttributeError, OSError, ValueError):
+            pass
+
+
+def console_text(text: str, encoding: str) -> str:
+    """Return text encodable in the given encoding (fallback: backslashreplace)."""
+    try:
+        text.encode(encoding)
+        return text
+    except UnicodeEncodeError:
+        return text.encode(encoding, errors="backslashreplace").decode(encoding)
+
+
+def log_print(
+    *args: object,
+    sep: str = " ",
+    end: str = "\n",
+    file: Any = sys.stdout,
+    flush: bool = False,
+) -> None:
+    """print() that never raises UnicodeEncodeError on Windows consoles."""
+    message = sep.join(str(arg) for arg in args) + end
+    encoding = getattr(file, "encoding", None)
+    if encoding:
+        message = console_text(message, encoding)
+    print(message, end="", file=file, flush=flush)
+
+
+def channel_label(channel_id: int, channel_by_id: dict[int, dict[str, Any]]) -> str:
+    channel = channel_by_id.get(channel_id)
+    name = channel.get("name") if channel else None
+    return f"#{name}" if name else str(channel_id)
+
+
+def log_reacted(
+    message_id: int | str,
+    *,
+    channel_id: int | None = None,
+    author: str | None = None,
+    channel_by_id: dict[int, dict[str, Any]] | None = None,
+) -> None:
+    parts = [f"+ reacted {ISRAEL_FLAG} on msg {message_id}"]
+    if channel_id is not None:
+        parts.append(f"in {channel_label(channel_id, channel_by_id or {})}")
+    if author:
+        parts.append(f"(@{author})")
+    log_print(" ".join(parts), flush=True)
+
+
+configure_stdio()
 CHROME_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -175,7 +254,7 @@ class DiscordAPI:
                 retry = float(response.json().get("retry_after", 1.0))
             except (ValueError, requests.JSONDecodeError):
                 retry = float(response.headers.get("Retry-After", 1.0))
-            print(f"  rate limited, waiting {retry:.2f}s")
+            log_print(f"  rate limited, waiting {retry:.2f}s")
             time.sleep(retry)
 
     def me(self) -> dict[str, Any]:
@@ -222,11 +301,11 @@ class DiscordAPI:
             except (ValueError, requests.JSONDecodeError):
                 pass
             body = response.text[:200]
-            print(f"  skip {message_id}: HTTP 403 {body}")
+            log_print(f"  skip {message_id}: HTTP 403 {body}")
             return "skipped"
         if response.status_code in (404, 400):
             body = response.text[:200]
-            print(f"  skip {message_id}: HTTP {response.status_code} {body}")
+            log_print(f"  skip {message_id}: HTTP {response.status_code} {body}")
             return "skipped"
         response.raise_for_status()
         return "skipped"
@@ -261,7 +340,7 @@ def mark_channel_no_react(
     if channel_id in skipped_channels:
         return
     skipped_channels.add(channel_id)
-    print(
+    log_print(
         f"  no react permission in {format_channel_label(channel_id, channel_by_id)} "
         "— skipping rest of channel"
     )
@@ -300,7 +379,7 @@ def backfill_last(
     if channel_id in skipped_channels:
         return
 
-    print(f"Backfill channel {channel_id}: last {count} message(s)")
+    log_print(f"Backfill channel {channel_id}: last {count} message(s)")
     reacted = 0
     skipped = 0
     fetched = 0
@@ -308,7 +387,7 @@ def backfill_last(
 
     while fetched < count:
         if timer.expired():
-            print(f"Backfill stopped for {channel_id}: timer expired.")
+            log_print(f"Backfill stopped for {channel_id}: timer expired.")
             return
 
         batch = api.fetch_messages(
@@ -321,7 +400,7 @@ def backfill_last(
 
         for message in batch:
             if timer.expired():
-                print(f"Backfill stopped for {channel_id}: timer expired.")
+                log_print(f"Backfill stopped for {channel_id}: timer expired.")
                 return
             fetched += 1
             ok, reason = should_process(
@@ -330,16 +409,21 @@ def backfill_last(
             if not ok:
                 skipped += 1
                 author = message.get("author", {}).get("username", "?")
-                print(f"  skip {message['id']} from {author}: {reason}")
+                log_print(f"  skip {message['id']} from {author}: {reason}")
                 continue
 
             outcome = api.add_reaction(channel_id, int(message["id"]), emoji)
             if outcome == "ok":
                 reacted += 1
-                print(f"  reacted on {message['id']}")
+                log_reacted(
+                    message["id"],
+                    channel_id=channel_id,
+                    author=message.get("author", {}).get("username"),
+                    channel_by_id=channel_by_id,
+                )
             elif outcome == "permission_denied":
                 mark_channel_no_react(channel_id, skipped_channels, channel_by_id)
-                print(
+                log_print(
                     f"Backfill done for {channel_id}: {reacted} reaction(s), "
                     f"{skipped} skipped, {fetched} message(s) checked."
                 )
@@ -352,7 +436,7 @@ def backfill_last(
 
         before = int(batch[-1]["id"])
 
-    print(
+    log_print(
         f"Backfill done for {channel_id}: {reacted} reaction(s), {skipped} skipped, "
         f"{fetched} message(s) checked."
     )
@@ -376,7 +460,7 @@ def backfill(
         return
 
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
-    print(f"Backfill channel {channel_id} since {cutoff.isoformat()}")
+    log_print(f"Backfill channel {channel_id} since {cutoff.isoformat()}")
 
     scanned = 0
     reacted = 0
@@ -385,7 +469,7 @@ def backfill(
 
     while True:
         if timer.expired():
-            print(f"Backfill stopped for {channel_id}: timer expired.")
+            log_print(f"Backfill stopped for {channel_id}: timer expired.")
             return
 
         batch = api.fetch_messages(channel_id, limit=100, before=before)
@@ -395,7 +479,7 @@ def backfill(
         reached_cutoff = False
         for message in batch:
             if timer.expired():
-                print(f"Backfill stopped for {channel_id}: timer expired.")
+                log_print(f"Backfill stopped for {channel_id}: timer expired.")
                 return
             scanned += 1
             created = parse_timestamp(message["timestamp"])
@@ -408,16 +492,21 @@ def backfill(
             if not ok:
                 skipped += 1
                 author = message.get("author", {}).get("username", "?")
-                print(f"  skip {message['id']} from {author}: {reason}")
+                log_print(f"  skip {message['id']} from {author}: {reason}")
                 continue
 
             outcome = api.add_reaction(channel_id, int(message["id"]), emoji)
             if outcome == "ok":
                 reacted += 1
-                print(f"  reacted on {message['id']}")
+                log_reacted(
+                    message["id"],
+                    channel_id=channel_id,
+                    author=message.get("author", {}).get("username"),
+                    channel_by_id=channel_by_id,
+                )
             elif outcome == "permission_denied":
                 mark_channel_no_react(channel_id, skipped_channels, channel_by_id)
-                print(
+                log_print(
                     f"Backfill done for {channel_id}: {reacted} reaction(s), "
                     f"{skipped} skipped, {scanned} message(s) checked."
                 )
@@ -430,7 +519,7 @@ def backfill(
 
         before = int(batch[-1]["id"])
 
-    print(
+    log_print(
         f"Backfill done for {channel_id}: {reacted} reaction(s), {skipped} skipped, "
         f"{scanned} scanned message(s)."
     )
@@ -473,7 +562,7 @@ def run_gateway(
             interval = interval_ms / 1000.0
             while not heartbeat_stop.wait(interval):
                 if timer.expired():
-                    print(f"Timer expired after {timer.minutes} minute(s). Stopping.")
+                    log_print(f"Timer expired after {timer.minutes} minute(s). Stopping.")
                     ws.close()
                     return
                 send_json(ws, {"op": 1, "d": get_sequence()})
@@ -488,13 +577,13 @@ def run_gateway(
             heartbeat_thread.join(timeout=2)
 
     def on_open(ws: WebSocketApp) -> None:
-        print("Gateway connected.")
+        log_print("Gateway connected.")
 
     def on_message(ws: WebSocketApp, raw: str) -> None:
         try:
             payload = json.loads(raw)
         except json.JSONDecodeError:
-            print("Gateway: received invalid JSON")
+            log_print("Gateway: received invalid JSON")
             return
 
         op = payload.get("op")
@@ -538,7 +627,7 @@ def run_gateway(
                 watched = ", ".join(str(channel_id) for channel_id in sorted(channel_ids))
             else:
                 watched = f"{len(channel_ids)} channels"
-            print(f"Gateway ready as {user.get('username')} — watching {watched}")
+            log_print(f"Gateway ready as {user.get('username')} — watching {watched}")
             return
 
         if op == 0 and event == "MESSAGE_CREATE" and isinstance(data, dict):
@@ -552,13 +641,18 @@ def run_gateway(
             )
             if not ok:
                 author = data.get("author", {}).get("username", "unknown")
-                print(f"skip new message from {author}: {reason}")
+                log_print(f"skip new message from {author}: {reason}")
                 return
             message_id = int(data["id"])
             outcome = api.add_reaction(message_channel_id, message_id, emoji)
             if outcome == "ok":
                 author = data.get("author", {}).get("username", "unknown")
-                print(f"reacted on new message from {author} in {message_channel_id}")
+                log_reacted(
+                    message_id,
+                    channel_id=message_channel_id,
+                    author=author,
+                    channel_by_id=channel_by_id,
+                )
             elif outcome == "permission_denied":
                 mark_channel_no_react(
                     message_channel_id, skipped_channels, channel_by_id
@@ -571,28 +665,28 @@ def run_gateway(
             return
 
         if op == 9 and isinstance(data, dict):
-            print("Invalid session, reconnecting...")
+            log_print("Invalid session, reconnecting...")
             stop_heartbeat()
             ws.close()
 
     def on_error(_ws: WebSocketApp, error: Exception) -> None:
-        print(f"Gateway error: {error}")
+        log_print(f"Gateway error: {error}")
 
     def on_close(_ws: WebSocketApp, status: int | None, msg: str | None) -> None:
         stop_heartbeat()
-        print(f"Gateway closed ({status}): {msg}")
+        log_print(f"Gateway closed ({status}): {msg}")
 
     while True:
         if timer.expired():
-            print(f"Timer expired after {timer.minutes} minute(s). Stopping.")
+            log_print(f"Timer expired after {timer.minutes} minute(s). Stopping.")
             return
 
         try:
             gateway = api.gateway_url()
         except requests.HTTPError as exc:
-            print(f"Failed to get gateway URL: {exc}")
+            log_print(f"Failed to get gateway URL: {exc}")
             if timer.wait_up_to(5):
-                print(f"Timer expired after {timer.minutes} minute(s). Stopping.")
+                log_print(f"Timer expired after {timer.minutes} minute(s). Stopping.")
                 return
             continue
 
@@ -608,23 +702,23 @@ def run_gateway(
             ws.run_forever()
         except KeyboardInterrupt:
             stop_heartbeat()
-            print("\nStopped.")
+            log_print("\nStopped.")
             return
         stop_heartbeat()
         set_sequence(None)
         if timer.expired():
-            print(f"Timer expired after {timer.minutes} minute(s). Stopping.")
+            log_print(f"Timer expired after {timer.minutes} minute(s). Stopping.")
             return
-        print("Reconnecting in 5s...")
+        log_print("Reconnecting in 5s...")
         if timer.wait_up_to(5):
-            print(f"Timer expired after {timer.minutes} minute(s). Stopping.")
+            log_print(f"Timer expired after {timer.minutes} minute(s). Stopping.")
             return
 
 
 def validate_guild_channel(channel: dict[str, Any], channel_id: int, guild_id: int) -> bool:
     channel_guild = channel.get("guild_id")
     if channel_guild is None or int(channel_guild) != guild_id:
-        print(
+        log_print(
             f"Error: channel {channel_id} is not in server {guild_id}.",
             file=sys.stderr,
         )
@@ -642,7 +736,7 @@ def resolve_channels(
         try:
             channel = api.get_channel(channel_id)
         except requests.HTTPError as exc:
-            print(f"Error: cannot access channel {channel_id} ({exc})", file=sys.stderr)
+            log_print(f"Error: cannot access channel {channel_id} ({exc})", file=sys.stderr)
             sys.exit(1)
 
         validate_guild_channel(channel, channel_id, guild_id)
@@ -657,7 +751,7 @@ def resolve_all_channels(
     try:
         guild_channels = api.list_guild_channels(guild_id)
     except requests.HTTPError as exc:
-        print(f"Error: cannot list channels for server {guild_id} ({exc})", file=sys.stderr)
+        log_print(f"Error: cannot list channels for server {guild_id} ({exc})", file=sys.stderr)
         sys.exit(1)
 
     candidates = sorted(
@@ -677,31 +771,31 @@ def resolve_all_channels(
         try:
             channel = api.get_channel(channel_id)
         except requests.HTTPError:
-            print(f"Warning: skipping #{name} ({channel_id}): no access", file=sys.stderr)
+            log_print(f"Warning: skipping #{name} ({channel_id}): no access", file=sys.stderr)
             continue
         validate_guild_channel(channel, channel_id, guild_id)
         channel_ids.append(channel_id)
         channels.append(channel)
 
     if not channel_ids:
-        print("Error: no accessible text channels found in server.", file=sys.stderr)
+        log_print("Error: no accessible text channels found in server.", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Resolved {len(channel_ids)} accessible text channel(s) in server {guild_id}.")
+    log_print(f"Resolved {len(channel_ids)} accessible text channel(s) in server {guild_id}.")
     return channel_ids, channels
 
 
 def main() -> None:
     args = parse_args()
     if not args.token:
-        print("Error: --token is required (or set DISCORD_TOKEN).", file=sys.stderr)
+        log_print("Error: --token is required (or set DISCORD_TOKEN).", file=sys.stderr)
         sys.exit(1)
 
     api = DiscordAPI(args.token)
     try:
         me = api.me()
     except requests.HTTPError:
-        print("Error: invalid token or API failure on /users/@me.", file=sys.stderr)
+        log_print("Error: invalid token or API failure on /users/@me.", file=sys.stderr)
         sys.exit(1)
 
     if args.channel.all_channels:
@@ -709,7 +803,7 @@ def main() -> None:
     else:
         channel_ids = list(dict.fromkeys(args.channel.ids))
         if len(channel_ids) < len(args.channel.ids):
-            print("Warning: duplicate channel IDs were removed.", file=sys.stderr)
+            log_print("Warning: duplicate channel IDs were removed.", file=sys.stderr)
         channels = resolve_channels(api, channel_ids, args.guild)
 
     if len(channel_ids) <= 10:
@@ -720,7 +814,7 @@ def main() -> None:
         channel_summary = ", ".join(channel_labels)
     else:
         channel_summary = f"{len(channel_ids)} channels"
-    print(
+    log_print(
         f"User: {me['username']} | channel(s) {channel_summary} | "
         f"server {args.guild} | emoji {args.emoji!r}"
     )
@@ -732,7 +826,7 @@ def main() -> None:
     if args.last > 0:
         for channel_id in channel_ids:
             if timer.expired():
-                print(f"Timer expired after {args.timer} minute(s). Stopping.")
+                log_print(f"Timer expired after {args.timer} minute(s). Stopping.")
                 return
             backfill_last(
                 api,
@@ -749,7 +843,7 @@ def main() -> None:
     elif args.minutes > 0:
         for channel_id in channel_ids:
             if timer.expired():
-                print(f"Timer expired after {args.timer} minute(s). Stopping.")
+                log_print(f"Timer expired after {args.timer} minute(s). Stopping.")
                 return
             backfill(
                 api,
@@ -765,23 +859,23 @@ def main() -> None:
             )
 
     if skipped_channels:
-        print(
+        log_print(
             f"No react permission in {len(skipped_channels)} channel(s); "
             "those channels will be skipped for the rest of this run."
         )
 
     if args.backfill_only or timer.expired():
         if timer.expired():
-            print(f"Timer expired after {args.timer} minute(s). Stopping.")
+            log_print(f"Timer expired after {args.timer} minute(s). Stopping.")
         return
 
     if timer.limited:
-        print(
+        log_print(
             f"Listening via Gateway WebSocket. Stops after {args.timer} minute(s). "
             "Ctrl+C to stop early."
         )
     else:
-        print("Listening via Gateway WebSocket. Ctrl+C to stop.")
+        log_print("Listening via Gateway WebSocket. Ctrl+C to stop.")
     run_gateway(
         api,
         args.token,

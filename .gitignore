@@ -4,3 +4,9 @@ __pycache__/
 venv/
 .env
 mcps/
+terminals/
+
+# newbs/ source (GUI, spec, build scripts) is tracked — only generated artifacts are ignored
+newbs/build/
+newbs/dist/
+newbs/__pycache__/

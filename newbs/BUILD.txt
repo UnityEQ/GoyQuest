@@ -1,0 +1,41 @@
+Goyquest Windows build
+======================
+
+Build the app
+-------------
+  cd newbs
+  .\build.ps1
+
+Output:
+  newbs\dist\Goyquest\Goyquest.exe
+
+Distribute the entire Goyquest folder (zip it for download). Users double-click Goyquest.exe.
+
+
+Development without building
+----------------------------
+  cd newbs
+  .\dev.ps1
+
+
+Why onedir (folder) instead of a single .exe?
+---------------------------------------------
+Single-file packers extract to a temp directory at runtime. Many antivirus products
+flag that pattern because malware uses it too. This build uses:
+
+  - onedir layout (exe + DLLs beside it)
+  - UPX disabled (UPX compression is a common false-positive trigger)
+  - Windows version metadata on the exe
+
+That is the most reliable way to reduce false positives without buying a code-signing
+certificate.
+
+
+If antivirus still flags it
+---------------------------
+1. Code-sign the exe with a real certificate (best fix; costs money).
+2. Submit the file to your AV vendor as a false positive.
+3. Do NOT use sketchy "AV bypass" packers — they make things worse.
+
+This app only runs when you press Go. It does not install itself, modify the registry,
+or download anything in the background.
