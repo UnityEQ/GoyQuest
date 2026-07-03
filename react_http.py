@@ -17,7 +17,9 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
+
+ReactionOutcome = Literal["ok", "permission_denied", "skipped"]
 from urllib.parse import quote
 
 import requests
@@ -207,18 +209,27 @@ class DiscordAPI:
         response.raise_for_status()
         return response.json()
 
-    def add_reaction(self, channel_id: int, message_id: int, emoji: str) -> bool:
+    def add_reaction(self, channel_id: int, message_id: int, emoji: str) -> ReactionOutcome:
         encoded = quote(emoji, safe="")
         path = f"/channels/{channel_id}/messages/{message_id}/reactions/{encoded}/@me"
         response = self.request("PUT", path)
         if response.status_code == 204:
-            return True
-        if response.status_code in (403, 404, 400):
+            return "ok"
+        if response.status_code == 403:
+            try:
+                if response.json().get("code") == 50013:
+                    return "permission_denied"
+            except (ValueError, requests.JSONDecodeError):
+                pass
+            body = response.text[:200]
+            print(f"  skip {message_id}: HTTP 403 {body}")
+            return "skipped"
+        if response.status_code in (404, 400):
             body = response.text[:200]
             print(f"  skip {message_id}: HTTP {response.status_code} {body}")
-            return False
+            return "skipped"
         response.raise_for_status()
-        return False
+        return "skipped"
 
     def gateway_url(self) -> str:
         response = self.request("GET", "/gateway")
@@ -229,6 +240,31 @@ class DiscordAPI:
 
 def parse_timestamp(raw: str) -> datetime:
     return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+
+
+def format_channel_label(
+    channel_id: int,
+    channel_by_id: dict[int, dict[str, Any]],
+) -> str:
+    channel = channel_by_id.get(channel_id)
+    name = channel.get("name") if channel else None
+    if name:
+        return f"#{name} ({channel_id})"
+    return str(channel_id)
+
+
+def mark_channel_no_react(
+    channel_id: int,
+    skipped_channels: set[int],
+    channel_by_id: dict[int, dict[str, Any]],
+) -> None:
+    if channel_id in skipped_channels:
+        return
+    skipped_channels.add(channel_id)
+    print(
+        f"  no react permission in {format_channel_label(channel_id, channel_by_id)} "
+        "— skipping rest of channel"
+    )
 
 
 def should_process(
@@ -247,26 +283,6 @@ def should_process(
     return True, None
 
 
-def fetch_last_messages(
-    api: DiscordAPI,
-    channel_id: int,
-    count: int,
-) -> list[dict[str, Any]]:
-    messages: list[dict[str, Any]] = []
-    before: int | None = None
-    while len(messages) < count:
-        batch = api.fetch_messages(
-            channel_id,
-            limit=min(100, count - len(messages)),
-            before=before,
-        )
-        if not batch:
-            break
-        messages.extend(batch)
-        before = int(batch[-1]["id"])
-    return messages[:count]
-
-
 def backfill_last(
     api: DiscordAPI,
     channel_id: int,
@@ -277,35 +293,68 @@ def backfill_last(
     skip_bots: bool,
     skip_self: bool,
     timer: RunTimer,
+    skipped_channels: set[int],
+    channel_by_id: dict[int, dict[str, Any]],
 ) -> None:
     assert api.user_id is not None
-    print(f"Backfill channel {channel_id}: last {count} message(s)")
+    if channel_id in skipped_channels:
+        return
 
-    messages = fetch_last_messages(api, channel_id, count)
+    print(f"Backfill channel {channel_id}: last {count} message(s)")
     reacted = 0
     skipped = 0
+    fetched = 0
+    before: int | None = None
 
-    for message in messages:
+    while fetched < count:
         if timer.expired():
             print(f"Backfill stopped for {channel_id}: timer expired.")
             return
-        ok, reason = should_process(
-            message, api.user_id, skip_bots=skip_bots, skip_self=skip_self
+
+        batch = api.fetch_messages(
+            channel_id,
+            limit=min(100, count - fetched),
+            before=before,
         )
-        if not ok:
-            skipped += 1
-            author = message.get("author", {}).get("username", "?")
-            print(f"  skip {message['id']} from {author}: {reason}")
-            continue
-        if api.add_reaction(channel_id, int(message["id"]), emoji):
-            reacted += 1
-            print(f"  reacted on {message['id']}")
-        if delay:
-            time.sleep(delay)
+        if not batch:
+            break
+
+        for message in batch:
+            if timer.expired():
+                print(f"Backfill stopped for {channel_id}: timer expired.")
+                return
+            fetched += 1
+            ok, reason = should_process(
+                message, api.user_id, skip_bots=skip_bots, skip_self=skip_self
+            )
+            if not ok:
+                skipped += 1
+                author = message.get("author", {}).get("username", "?")
+                print(f"  skip {message['id']} from {author}: {reason}")
+                continue
+
+            outcome = api.add_reaction(channel_id, int(message["id"]), emoji)
+            if outcome == "ok":
+                reacted += 1
+                print(f"  reacted on {message['id']}")
+            elif outcome == "permission_denied":
+                mark_channel_no_react(channel_id, skipped_channels, channel_by_id)
+                print(
+                    f"Backfill done for {channel_id}: {reacted} reaction(s), "
+                    f"{skipped} skipped, {fetched} message(s) checked."
+                )
+                return
+            if delay:
+                time.sleep(delay)
+
+            if fetched >= count:
+                break
+
+        before = int(batch[-1]["id"])
 
     print(
         f"Backfill done for {channel_id}: {reacted} reaction(s), {skipped} skipped, "
-        f"{len(messages)} message(s) fetched."
+        f"{fetched} message(s) checked."
     )
 
 
@@ -319,8 +368,13 @@ def backfill(
     skip_bots: bool,
     skip_self: bool,
     timer: RunTimer,
+    skipped_channels: set[int],
+    channel_by_id: dict[int, dict[str, Any]],
 ) -> None:
     assert api.user_id is not None
+    if channel_id in skipped_channels:
+        return
+
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
     print(f"Backfill channel {channel_id} since {cutoff.isoformat()}")
 
@@ -356,9 +410,18 @@ def backfill(
                 author = message.get("author", {}).get("username", "?")
                 print(f"  skip {message['id']} from {author}: {reason}")
                 continue
-            if api.add_reaction(channel_id, int(message["id"]), emoji):
+
+            outcome = api.add_reaction(channel_id, int(message["id"]), emoji)
+            if outcome == "ok":
                 reacted += 1
                 print(f"  reacted on {message['id']}")
+            elif outcome == "permission_denied":
+                mark_channel_no_react(channel_id, skipped_channels, channel_by_id)
+                print(
+                    f"Backfill done for {channel_id}: {reacted} reaction(s), "
+                    f"{skipped} skipped, {scanned} message(s) checked."
+                )
+                return
             if delay:
                 time.sleep(delay)
 
@@ -382,6 +445,8 @@ def run_gateway(
     skip_bots: bool,
     skip_self: bool,
     timer: RunTimer,
+    skipped_channels: set[int],
+    channel_by_id: dict[int, dict[str, Any]],
 ) -> None:
     assert api.user_id is not None
     sequence: int | None = None
@@ -480,6 +545,8 @@ def run_gateway(
             message_channel_id = int(data.get("channel_id", 0))
             if message_channel_id not in channel_ids:
                 return
+            if message_channel_id in skipped_channels:
+                return
             ok, reason = should_process(
                 data, api.user_id, skip_bots=skip_bots, skip_self=skip_self
             )
@@ -488,9 +555,14 @@ def run_gateway(
                 print(f"skip new message from {author}: {reason}")
                 return
             message_id = int(data["id"])
-            if api.add_reaction(message_channel_id, message_id, emoji):
+            outcome = api.add_reaction(message_channel_id, message_id, emoji)
+            if outcome == "ok":
                 author = data.get("author", {}).get("username", "unknown")
                 print(f"reacted on new message from {author} in {message_channel_id}")
+            elif outcome == "permission_denied":
+                mark_channel_no_react(
+                    message_channel_id, skipped_channels, channel_by_id
+                )
             return
 
         if op == 7:
@@ -654,6 +726,8 @@ def main() -> None:
     )
 
     timer = RunTimer(args.timer)
+    skipped_channels: set[int] = set()
+    channel_by_id = {int(channel["id"]): channel for channel in channels}
 
     if args.last > 0:
         for channel_id in channel_ids:
@@ -669,6 +743,8 @@ def main() -> None:
                 skip_bots=args.skip_bots,
                 skip_self=args.skip_self,
                 timer=timer,
+                skipped_channels=skipped_channels,
+                channel_by_id=channel_by_id,
             )
     elif args.minutes > 0:
         for channel_id in channel_ids:
@@ -684,7 +760,15 @@ def main() -> None:
                 skip_bots=args.skip_bots,
                 skip_self=args.skip_self,
                 timer=timer,
+                skipped_channels=skipped_channels,
+                channel_by_id=channel_by_id,
             )
+
+    if skipped_channels:
+        print(
+            f"No react permission in {len(skipped_channels)} channel(s); "
+            "those channels will be skipped for the rest of this run."
+        )
 
     if args.backfill_only or timer.expired():
         if timer.expired():
@@ -706,6 +790,8 @@ def main() -> None:
         skip_bots=args.skip_bots,
         skip_self=args.skip_self,
         timer=timer,
+        skipped_channels=skipped_channels,
+        channel_by_id=channel_by_id,
     )
 
 
